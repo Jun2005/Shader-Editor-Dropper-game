@@ -9,7 +9,7 @@ This is a mobile game made entirely using shader code (GLSL) in an application c
 - Custom ray casting rendering
 
 ### Challenges
-As this is a mobile game, performance was a big issue during development. The major contributor to the performance was the chosen rendering method. The game originally utilized ray marching as a rendering algorithm. However, this approach was very computationally expensive, and rendering just 12 cuboids dropped the fps to <10. 
+As this is a mobile game, performance was a big issue during development. The major contributor to the performance issue was the chosen rendering method. The game originally utilized ray marching as a rendering algorithm. However, this approach was very computationally expensive, and rendering just 12 cuboids dropped the fps to <10. 
 
 Ray marching is a rendering method involving iterative steps through the scene using signed distance fields (SDFs), and it offers many unique qualities, such as the ability to easily create metaballs, infinitely detailed geometry, and infinite tiling of geometry. My game did not utilize these qualities, so I swapped the rendering method to ray casting, which dramatically improved performance (roughly 4 to 5 times more fps).
 
