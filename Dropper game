@@ -1,0 +1,560 @@
+#version 300 es
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+
+out vec4 fragColor;
+uniform vec2 resolution;
+uniform vec3 orientation;
+uniform int frame;
+uniform sampler2D backbuffer;
+uniform float startRandom;
+uniform sampler2D denjiro;///min:n;mag:l;s:c;t:c;
+
+//------------Settings--------------
+float fov = 45.;
+vec3 backgroundColor = vec3(0.09,0.03,0.09);
+vec3 objectColor = vec3(0.22,0.45,0.32);
+float movementSensitivity = 10.;//in degrees between 1~90
+bool scanlines = true;
+float lineNum = 376.5;//best if it is a multiple of your phone's y resolution
+vec3 scanlineColor = vec3(0.05,0.05,0.05);
+float scoreSize = 11.;
+vec4 scoreColor = vec4(0.8,0.3,0.3,0.5);//w is alpha
+bool showBackground = false;//you can turn this off to increase fps
+float pulseRadius = 350.;
+float pulseThickness = 5.;
+float pulseSpd = 0.02;
+vec4 pulseColor = vec4(0.8,0.2,0.2,0.8);
+float speed = 0.015;
+//----------------------------------
+
+//2 vec3 per cube [position, size]
+vec3[8] walls = vec3[](vec3(0.,25.,-50.), vec3(26.,1.,50.),
+            vec3(25.,0.,-50.), vec3(1.,26.,50.),
+            vec3(-25.,0.,-50.), vec3(1.,26.,50.),
+            vec3(0.,-25.,-50.), vec3(26.,1.,50.));
+vec3[16] cubes;
+
+vec3 camPos = vec3(0.,0.,0.);//cam faces -z dir
+float yRot = 0.;//In radians
+float xRot = 0.;//In radians
+mat3 rotMatrix;
+vec3 rayDir;
+vec3 rayPos = vec3(0.,0.,0.);
+vec3 finalColor;
+bool hit = false;
+vec3 surfacePos = vec3(0.,0.,0.);
+vec3 normal;
+float depth = 0.;
+float attenuation = 100.;
+float gameOver = 0.;//1. if player dies
+float score = 0.;//max score is 255 i think
+float pulseTracker = 0.;
+float screenShake = 0.;
+float t = 10000.;
+
+float ease(float a, float b, float t){
+  float diff = b-a;
+  return a + diff * pow(t-1.,2.);
+}
+
+float remap(float x,float iMin, float iMax, float oMin, float oMax){
+  float ans = min(max(iMin, x),iMax);
+  return (ans-iMin)/(iMax-iMin)*(oMax-oMin)+oMin;
+}
+
+vec3 pointLight(vec3 lightPos, vec3 pos, vec3 color, float radius){
+  float dist = distance(lightPos, pos);
+  float alignment = clamp(dot(normal, normalize(lightPos-pos)),0.,1.);
+  float brightness = ease(0.,1.,clamp(remap(dist,0.,radius,0.,1.),0.,1.)) * alignment;
+  return floor(brightness*13.)/13.*color;
+}
+
+vec3 findRayDir(){
+  float pixelSize = 1.;
+  if(scanlines){
+  pixelSize = resolution.y / lineNum;
+  }
+  vec2 fragCoord = floor(gl_FragCoord.xy/pixelSize)*pixelSize;
+  vec2 centered = fragCoord - vec2(resolution.x,resolution.y)/2.;
+  float zDist = -(resolution.x/2.)/tan(radians(fov/2.));
+  vec3 dir = normalize(vec3(centered, zDist));
+  rotMatrix = mat3(cos(yRot) ,0. ,-sin(yRot),
+          sin(xRot)*sin(yRot),cos(xRot) ,sin(xRot)*cos(yRot),
+          cos(xRot)*sin(yRot),-sin(xRot),cos(xRot)*cos(yRot));
+  dir = rotMatrix*dir;
+  return dir;
+}
+
+//Check for axis aligned plane collision. lower is the lower corner of the plane
+void cubePlaneCheck(vec3 lower, vec3 upper, vec3 center){
+  if(lower.x == upper.x){
+    float t0 = (lower.x-camPos.x)/rayDir.x;
+    if(t0<0.){
+      return;
+    }
+    //SP short for surface position
+    vec3 potentialSP = camPos + t0*rayDir;
+    if(potentialSP.y>lower.y && potentialSP.y<upper.y && potentialSP.z>lower.z && potentialSP.z<upper.z){
+      hit = true;
+      if (t0<t){
+        t = t0;
+        surfacePos = potentialSP;
+        normal = vec3(sign(lower.x-center.x),0.,0.);
+      }
+    }
+  }
+  if(lower.y == upper.y){
+    float t0 = (lower.y-camPos.y)/rayDir.y;
+    if(t0<0.){
+      return;
+    }
+    //SP short for surface position
+    vec3 potentialSP = camPos + t0*rayDir;
+    if(potentialSP.x>lower.x && potentialSP.x<upper.x && potentialSP.z>lower.z && potentialSP.z<upper.z){
+      hit = true;
+      if (t0<t){
+        t = t0;
+        surfacePos = potentialSP;
+        normal = vec3(0.,sign(lower.y-center.y),0.);
+      }
+    }
+  }
+  if(lower.z == upper.z){
+    float t0 = (lower.z-camPos.z)/rayDir.z;
+    if(t0<0.){
+      return;
+    }
+    //SP short for surface position
+    vec3 potentialSP = camPos + t0*rayDir;
+    if(potentialSP.y>lower.y && potentialSP.y<upper.y && potentialSP.x>lower.x && potentialSP.x<upper.x){
+      hit = true;
+      if (t0<t){
+        t = t0;
+        surfacePos = potentialSP;
+        normal = vec3(0.,0.,sign(lower.z-center.z));
+      }
+    }
+  }
+}
+
+void cubeCheck(){
+  for (int i=0;i<cubes.length();i+=2){
+    cubePlaneCheck(cubes[i]+cubes[i+1].xyz*vec3(1.,-1.,-1.),cubes[i]+cubes[i+1].xyz,cubes[i]);
+    cubePlaneCheck(cubes[i]-cubes[i+1].xyz,cubes[i]+cubes[i+1].xyz*vec3(-1.,1.,1.),cubes[i]);
+    cubePlaneCheck(cubes[i]+cubes[i+1].xyz*vec3(-1.,1.,-1.),cubes[i]+cubes[i+1].xyz,cubes[i]);
+    cubePlaneCheck(cubes[i]-cubes[i+1].xyz,cubes[i]+cubes[i+1].xyz*vec3(1.,-1.,1.),cubes[i]);
+    cubePlaneCheck(cubes[i]+cubes[i+1].xyz*vec3(-1.,-1.,1.),cubes[i]+cubes[i+1].xyz,cubes[i]);
+    cubePlaneCheck(cubes[i]-cubes[i+1].xyz,cubes[i]+cubes[i+1].xyz*vec3(1.,1.,-1.),cubes[i]);
+  }
+}
+void wallsCheck(){
+  for (int i=0;i<walls.length();i+=2){
+    cubePlaneCheck(walls[i]+walls[i+1].xyz*vec3(1.,-1.,-1.),walls[i]+walls[i+1].xyz,walls[i]);
+    cubePlaneCheck(walls[i]-walls[i+1].xyz,walls[i]+walls[i+1].xyz*vec3(-1.,1.,1.),walls[i]);
+    cubePlaneCheck(walls[i]+walls[i+1].xyz*vec3(-1.,1.,-1.),walls[i]+walls[i+1].xyz,walls[i]);
+    cubePlaneCheck(walls[i]-walls[i+1].xyz,walls[i]+walls[i+1].xyz*vec3(1.,-1.,1.),walls[i]);
+    cubePlaneCheck(walls[i]+walls[i+1].xyz*vec3(-1.,-1.,1.),walls[i]+walls[i+1].xyz,walls[i]);
+    cubePlaneCheck(walls[i]-walls[i+1].xyz,walls[i]+walls[i+1].xyz*vec3(1.,1.,-1.),walls[i]);
+  }
+}
+
+vec3 colorLerp(float x, vec3 a, vec3 b){
+  vec3 c = b-a;
+  return a+x*c;
+}
+
+void setCubes(inout vec3[16] cubes, float dist, int index, int type){
+  if(type == 0){
+    cubes[index] = vec3(0.,4.,dist);
+    cubes[index+1] = vec3(6.,2.,0.2);
+    cubes[index+2] = vec3(4.,0.,dist);
+    cubes[index+3] = vec3(2.,6.,0.2);
+    cubes[index+4] = vec3(0.,-4.,dist);
+    cubes[index+5] = vec3(6.,2.,0.2);
+    cubes[index+6] = vec3(-4.,0.,dist);
+    cubes[index+7] = vec3(2.,6.,0.2);
+  }
+  else if(type == 1){
+    cubes[index] = vec3(0.,4.,dist);
+    cubes[index+1] = vec3(6.,2.,0.2);
+    cubes[index+2] = vec3(2.,0.,dist);
+    cubes[index+3] = vec3(4.,6.,0.2);
+    cubes[index+4] = vec3(0.,-4.,dist);
+    cubes[index+5] = vec3(6.,2.,0.2);
+    cubes[index+6] = vec3(0,0.,dist);
+    cubes[index+7] = vec3(0.,0.,0.);
+  }
+  else if(type == 2){
+    cubes[index] = vec3(0.,4.,dist);
+    cubes[index+1] = vec3(6.,2.,0.2);
+    cubes[index+2] = vec3(-2.,0.,dist);
+    cubes[index+3] = vec3(4.,6.,0.2);
+    cubes[index+4] = vec3(0.,-4.,dist);
+    cubes[index+5] = vec3(6.,2.,0.2);
+    cubes[index+6] = vec3(0,0.,dist);
+    cubes[index+7] = vec3(0.,0.,0.);
+  }
+  else if(type == 3){
+    cubes[index] = vec3(0.,0.,dist);
+    cubes[index+1] = vec3(0.,0.,0.);
+    cubes[index+2] = vec3(4.,0.,dist);
+    cubes[index+3] = vec3(2.,6.,0.2);
+    cubes[index+4] = vec3(0.,-2.,dist);
+    cubes[index+5] = vec3(6.,4.,0.2);
+    cubes[index+6] = vec3(-4.,0.,dist);
+    cubes[index+7] = vec3(2.,6.,0.2);
+  }
+  else if(type == 4){
+    cubes[index] = vec3(0.,0.,dist);
+    cubes[index+1] = vec3(0.,0.,0.);
+    cubes[index+2] = vec3(2.,0.,dist);
+    cubes[index+3] = vec3(4.,6.,0.2);
+    cubes[index+4] = vec3(0.,-2.,dist);
+    cubes[index+5] = vec3(6.,4.,0.2);
+    cubes[index+6] = vec3(0.,0.,dist);
+    cubes[index+7] = vec3(0.,0.,0.);
+  }
+  else if(type == 5){
+    cubes[index] = vec3(0.,0.,dist);
+    cubes[index+1] = vec3(0.,0.,0.);
+    cubes[index+2] = vec3(0.,0.,dist);
+    cubes[index+3] = vec3(0.,0.,0.);
+    cubes[index+4] = vec3(0.,-2.,dist);
+    cubes[index+5] = vec3(6.,4.,0.2);
+    cubes[index+6] = vec3(-2.,0.,dist);
+    cubes[index+7] = vec3(4.,6.,0.2);
+  }
+  else if(type == 6){
+    cubes[index] = vec3(0.,2.,dist);
+    cubes[index+1] = vec3(6.,4.,0.2);
+    cubes[index+2] = vec3(4.,0.,dist);
+    cubes[index+3] = vec3(2.,6.,0.2);
+    cubes[index+4] = vec3(0.,0.,dist);
+    cubes[index+5] = vec3(0.,0.,0.);
+    cubes[index+6] = vec3(-4.,0.,dist);
+    cubes[index+7] = vec3(2.,6.,0.2);
+  }
+  else if(type == 7){
+    cubes[index] = vec3(0.,2.,dist);
+    cubes[index+1] = vec3(6.,4.,0.2);
+    cubes[index+2] = vec3(2.,0.,dist);
+    cubes[index+3] = vec3(4.,6.,0.2);
+    cubes[index+4] = vec3(0.,0.,dist);
+    cubes[index+5] = vec3(0.,0.,0.);
+    cubes[index+6] = vec3(0.,0.,dist);
+    cubes[index+7] = vec3(0.,0.,0.);
+  }
+  else{
+    cubes[index] = vec3(0.,2.,dist);
+    cubes[index+1] = vec3(6.,4.,0.2);
+    cubes[index+2] = vec3(0.,0.,dist);
+    cubes[index+3] = vec3(0.,0.,0.);
+    cubes[index+4] = vec3(0.,0.,dist);
+    cubes[index+5] = vec3(0.,0.,0.);
+    cubes[index+6] = vec3(-2.,0.,dist);
+    cubes[index+7] = vec3(4.,6.,0.2);
+  }
+}
+
+float rand(float x){
+  return fract(sin(x+startRandom*100.)*43758.5453123);
+}
+
+bool hitCheck(int type){
+  if(type == 0){
+    return camPos.x>2. || camPos.x<-2. || camPos.y>2. || camPos.y<-2.;
+  }
+  else if(type == 1){
+    return camPos.x>-2. || camPos.y>2. || camPos.y<-2.;
+  }
+  else if(type == 2){
+    return camPos.x<2. || camPos.y>2. || camPos.y<-2.;
+  }
+  else if(type == 3){
+    return camPos.x<-2. || camPos.x>2. || camPos.y<2.;
+  }
+  else if(type == 4){
+    return camPos.x>-2. || camPos.y<2.;
+  }
+  else if(type == 5){
+    return camPos.x<2. || camPos.y<2.;
+  }
+  else if(type == 6){
+    return camPos.x<-2. || camPos.x>2. || camPos.y>-2.;
+  }
+  else if(type == 7){
+    return camPos.x>-2. || camPos.y>-2.;
+  }
+  else{
+    return camPos.x<2. || camPos.y>-2.;
+  }
+}
+
+void box(vec2 pos,float size){
+  vec2 disp = abs(gl_FragCoord.xy-pos);
+  if(disp.x<=size&&disp.y<=size){
+    finalColor += scoreColor.rgb*scoreColor.a;
+  }
+}
+
+void displayDigit(float digit,vec2 pos,float size){
+  vec3 row1 = vec3(0.,0.,0.);
+  vec3 row2 = vec3(0.,0.,0.);
+  vec3 row3 = vec3(0.,0.,0.);
+  vec3 row4 = vec3(0.,0.,0.);
+  vec3 row5 = vec3(0.,0.,0.);
+  if(digit==0.){
+    row1 = vec3(1.,1.,1.);
+    row2 = vec3(1.,0.,1.);
+    row3 = vec3(1.,0.,1.);
+    row4 = vec3(1.,0.,1.);
+    row5 = vec3(1.,1.,1.);
+  }
+  else if(digit==1.){
+    row1 = vec3(1.,1.,0.);
+    row2 = vec3(0.,1.,0.);
+    row3 = vec3(0.,1.,0.);
+    row4 = vec3(0.,1.,0.);
+    row5 = vec3(1.,1.,1.);
+  }
+  else if(digit==2.){
+    row1 = vec3(1.,1.,1.);
+    row2 = vec3(1.,0.,1.);
+    row3 = vec3(0.,0.,1.);
+    row4 = vec3(0.,1.,0.);
+    row5 = vec3(1.,1.,1.);
+  }
+  else if(digit==3.){
+    row1 = vec3(1.,1.,1.);
+    row2 = vec3(0.,0.,1.);
+    row3 = vec3(1.,1.,1.);
+    row4 = vec3(0.,0.,1.);
+    row5 = vec3(1.,1.,1.);
+  }
+  else if(digit==4.){
+    row1 = vec3(0.,1.,1.);
+    row2 = vec3(1.,0.,1.);
+    row3 = vec3(1.,1.,1.);
+    row4 = vec3(0.,0.,1.);
+    row5 = vec3(0.,0.,1.);
+  }
+  else if(digit==5.){
+    row1 = vec3(1.,1.,1.);
+    row2 = vec3(1.,0.,0.);
+    row3 = vec3(1.,1.,1.);
+    row4 = vec3(0.,0.,1.);
+    row5 = vec3(1.,1.,1.);
+  }
+  else if(digit==6.){
+    row1 = vec3(1.,1.,1.);
+    row2 = vec3(1.,0.,0.);
+    row3 = vec3(1.,1.,1.);
+    row4 = vec3(1.,0.,1.);
+    row5 = vec3(1.,1.,1.);
+  }
+  else if(digit==7.){
+    row1 = vec3(1.,1.,1.);
+    row2 = vec3(1.,0.,1.);
+    row3 = vec3(0.,0.,1.);
+    row4 = vec3(0.,0.,1.);
+    row5 = vec3(0.,0.,1.);
+  }
+  else if(digit==8.){
+    row1 = vec3(1.,1.,1.);
+    row2 = vec3(1.,0.,1.);
+    row3 = vec3(0.,1.,0.);
+    row4 = vec3(1.,0.,1.);
+    row5 = vec3(1.,1.,1.);
+  }
+  else if(digit==9.){
+    row1 = vec3(1.,1.,1.);
+    row2 = vec3(1.,0.,1.);
+    row3 = vec3(1.,1.,1.);
+    row4 = vec3(0.,0.,1.);
+    row5 = vec3(1.,1.,1.);
+  }
+  box(pos+vec2(-size*2.,size*4.),size*row1.x);
+  box(pos+vec2(0.,size*4.),size*row1.y);
+  box(pos+vec2(size*2.,size*4.),size*row1.z);
+  box(pos+vec2(-size*2.,size*2.),size*row2.x);
+  box(pos+vec2(0.,size*2.),size*row2.y);
+  box(pos+vec2(size*2.,size*2.),size*row2.z);
+  box(pos+vec2(-size*2.,0.),size*row3.x);
+  box(pos+vec2(0.,0.),size*row3.y);
+  box(pos+vec2(size*2.,0.),size*row3.z);
+  box(pos+vec2(-size*2.,-size*2.),size*row4.x);
+  box(pos+vec2(0.,-size*2.),size*row4.y);
+  box(pos+vec2(size*2.,-size*2.),size*row4.z);
+  box(pos+vec2(-size*2.,-size*4.),size*row5.x);
+  box(pos+vec2(0.,-size*4.),size*row5.y);
+  box(pos+vec2(size*2.,-size*4.),size*row5.z);
+}
+
+void displayNum(float num,vec2 pos, float size){
+  float exponent = 0.;
+  float temp = num;
+  while(temp>=1.){
+    temp/=10.;
+    exponent++;
+  }
+  temp=num;
+  for(int i=0;i<int(exponent);i++){
+    displayDigit(floor(temp/pow(10.,exponent-float(i)-1.)),pos+vec2(float(i)*size*8.,0.),size);
+    temp-=floor(temp/pow(10.,exponent-float(i)-1.))*pow(10.,exponent-float(i)-1.);
+  }
+  if(exponent==0.){
+    exponent = 1.;
+    displayDigit(0.,pos,size);
+  }
+}
+
+void playPulse(){
+  float pixelSize = 1.;
+  if(scanlines){
+    pixelSize = resolution.y / lineNum;
+  }
+  vec2 fragCoord = floor(gl_FragCoord.xy/pixelSize)*pixelSize;
+  float dist = length(fragCoord-resolution/2.);
+  if(dist<pulseRadius*(1.-pow(pulseTracker,2.))
+  && dist>pulseRadius*(1.-pulseTracker)-pulseThickness*pulseTracker){
+    float edge = dist - (pulseRadius*(1.-pulseTracker)-pulseThickness*pulseTracker);
+    finalColor += pulseColor.rgb * pulseColor.a * clamp(edge/(pulseRadius*(-pow(pulseTracker,2.)+pulseTracker)+pulseThickness*pulseTracker),0.,1.) * pulseTracker;
+  }
+}
+void resetPulse(){
+  pulseTracker = 1.;
+}
+
+void main(void) {
+  //Get score
+  if(frame != 0){
+    score = round(texture(backbuffer, vec2(2.5+float(cubes.length())/8., 0.5)/resolution.xy).x*200.);
+  }
+  //Get pulseTracker
+  pulseTracker = texture(backbuffer, vec2(0.5,1.5)/resolution).x;
+  //Get screenShake
+  if(frame != 0){
+    screenShake = texture(backbuffer, vec2(0.5,2.5)/resolution).x;
+  }
+
+  //Scan lines
+  if(scanlines && mod(floor(gl_FragCoord.y*lineNum/resolution.y),2.)==1.){
+    fragColor = vec4(scanlineColor,0.);
+    return;
+  }
+
+  float xInput = clamp(orientation.z/radians(movementSensitivity),-1.,1.);
+  float yInput = clamp(orientation.y/radians(movementSensitivity),-1.,1.);
+  //Find camera position
+  camPos = vec3(xInput*5.,yInput*5.,0.);
+  //Find rotation
+  xRot = -yInput*radians(10.);
+  yRot = xInput*radians(10.);
+  //Set gameOver variable
+  gameOver = texture(backbuffer, vec2(1.5+float(cubes.length())/8., 0.5)/resolution.xy).x;
+  //Set cubes
+  if(frame == 0){
+    for(float i=0.;i<float(cubes.length())/8.;i++){
+      if(gl_FragCoord.xy == vec2(0.5+i, 0.5)){
+        fragColor = vec4(rand(i),(50.+50.*i)/100.,0.,0.);
+        return;
+      }
+    }
+  }
+  vec2 info;
+  for(float i=0.;i<float(cubes.length())/8.;i++){
+    //x contains the type, y contains the distance
+    info = texture(backbuffer, vec2(0.5+i, 0.5)/resolution.xy).xy;
+    if(info.y == 0. && frame != 0){
+      //check for game over
+      if(hitCheck(clamp(int(info.x*8.),0,8))){
+        if(gl_FragCoord.xy == vec2(1.5+float(cubes.length())/8.,0.5)){
+          fragColor = vec4(1.,0.,0.,0.);
+          return;
+        }
+        else if(gl_FragCoord.xy == vec2(0.5,2.5) && gameOver==0.){
+          fragColor = vec4(1.,0.,0.,0.);
+          screenShake = 1.;
+          return;
+        }
+      }
+      else{
+        if(gameOver == 0.){
+          score++;
+          resetPulse();
+        }
+      }
+      if(gl_FragCoord.xy == vec2(0.5+i, 0.5)){
+        //Move the obstacle back and give a new shape
+        fragColor = vec4(rand(float(frame)),1.,0.,0.);
+        return;
+      }
+    }
+    if(gl_FragCoord.xy == vec2(0.5+i, 0.5)){
+      fragColor = vec4(info.x,info.y-speed,0.,0.);
+      return;
+    }
+
+    setCubes(cubes, -info.y*100., int(i)*8, clamp(int(info.x*8.),0,8));
+  }
+  //Set gameOver pixel
+  if(gl_FragCoord.xy == vec2(1.5+float(cubes.length())/8.,0.5)){
+    fragColor = vec4(gameOver,0.,0.,0.);
+    return;
+  }
+  //Set score pixel
+  if(gl_FragCoord.xy == vec2(2.5+float(cubes.length())/8.,0.5)){
+    fragColor = vec4(score/200.,0.,0.,0.);
+    return;
+  }
+  //Set screenShake pixel
+  if(gl_FragCoord.xy == vec2(0.5,2.5)){
+    screenShake -= 0.02;
+    fragColor = vec4(screenShake,0.,0.,0.);
+    return;
+  }
+
+  rayDir = findRayDir();
+  cubeCheck();
+  wallsCheck();
+  finalColor = backgroundColor;
+
+  if (hit == true && gameOver == 0.){
+    finalColor = objectColor;
+    finalColor += pointLight(camPos+vec3(0.,0.,-0.5), surfacePos,vec3(0.7,0.1,0.1),50.);
+    finalColor = colorLerp(remap(distance(surfacePos, camPos),0.,attenuation,1.,0.),backgroundColor,finalColor);
+  }
+  if(gameOver == 1.){
+    //game over jumpscare
+    float pixelSize = 1.;
+    if(scanlines){
+      pixelSize = resolution.y / lineNum;
+    }
+    vec2 uv = floor(gl_FragCoord.xy/pixelSize)*pixelSize / resolution.x + vec2(0.03+screenShake*0.03*(rand(float(frame)+floor(gl_FragCoord.y/pixelSize)*pixelSize)-0.5),-0.6);
+    finalColor += texture(denjiro,uv).rgb*0.2;
+  }
+
+  //Display score
+  float temp = score;
+  float exponent = 0.;
+  while(temp>=10.){
+    temp/=10.;
+    exponent++;
+  }
+  vec2 randomDir = normalize(vec2(rand(float(frame))-0.5,rand(float(frame+69))-0.5));
+  displayNum(score, resolution.xy/2.-vec2(scoreSize*4.*exponent,0.5)+randomDir*screenShake*50.,scoreSize);
+
+  //Update pulseTracker and show pulse effect
+  if(gl_FragCoord.xy == vec2(0.5,1.5)){
+    pulseTracker -= pulseSpd;
+    fragColor = vec4(pulseTracker,0.,0.,0.);
+    return;
+  }
+  playPulse();
+
+  fragColor = vec4(finalColor, 1.0);
+}
